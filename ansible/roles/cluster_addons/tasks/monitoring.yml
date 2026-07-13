@@ -1,0 +1,154 @@
+---
+- name: Check monitoring namespace
+  ansible.builtin.command:
+    cmd: kubectl --kubeconfig /etc/kubernetes/admin.conf get namespace monitoring
+  register: monitoring_namespace
+  changed_when: false
+  failed_when: false
+
+- name: Create monitoring namespace
+  ansible.builtin.command:
+    cmd: kubectl --kubeconfig /etc/kubernetes/admin.conf create namespace monitoring
+  when: monitoring_namespace.rc != 0
+  changed_when: true
+
+- name: Check Grafana admin secret
+  ansible.builtin.command:
+    cmd: kubectl --kubeconfig /etc/kubernetes/admin.conf get secret monitoring-grafana-admin --namespace monitoring
+  register: grafana_admin_secret
+  changed_when: false
+  failed_when: false
+
+- name: Create Grafana admin secret
+  ansible.builtin.shell:
+    cmd: |
+      password="$(openssl rand -base64 32)"
+      kubectl --kubeconfig /etc/kubernetes/admin.conf create secret generic monitoring-grafana-admin \
+        --namespace monitoring \
+        --from-literal=admin-user=admin \
+        --from-literal=admin-password="$password"
+  when: grafana_admin_secret.rc != 0
+  no_log: true
+  changed_when: true
+
+- name: Copy kube-prometheus-stack values
+  ansible.builtin.copy:
+    src: kube-prometheus-stack-values.yaml
+    dest: /tmp/kube-prometheus-stack-values.yaml
+    mode: "0644"
+
+- name: Install or upgrade kube-prometheus-stack
+  kubernetes.core.helm:
+    binary_path: /usr/local/bin/helm
+    kubeconfig: /etc/kubernetes/admin.conf
+    release_name: monitoring
+    chart_ref: kube-prometheus-stack
+    chart_repo_url: https://prometheus-community.github.io/helm-charts
+    chart_version: "{{ kube_prometheus_stack_chart_version }}"
+    release_namespace: monitoring
+    create_namespace: true
+    values_files:
+      - /tmp/kube-prometheus-stack-values.yaml
+    state: present
+    wait: true
+    atomic: true
+    timeout: 10m0s
+    history_max: 5
+
+- name: Read Telegram alerting env
+  ansible.builtin.set_fact:
+    telegram_bot_token: "{{ lookup('ansible.builtin.env', 'TELEGRAM_BOT_TOKEN') }}"
+    telegram_chat_id: "{{ lookup('ansible.builtin.env', 'TELEGRAM_CHAT_ID') }}"
+  no_log: true
+
+- name: Create Alertmanager Telegram secret
+  ansible.builtin.shell:
+    cmd: |
+      kubectl --kubeconfig /etc/kubernetes/admin.conf create secret generic alertmanager-telegram \
+        --namespace mainplatform \
+        --from-literal=bot-token="$TELEGRAM_BOT_TOKEN" \
+        --dry-run=client -o yaml |
+      kubectl --kubeconfig /etc/kubernetes/admin.conf apply -f -
+  environment:
+    TELEGRAM_BOT_TOKEN: "{{ telegram_bot_token }}"
+  register: telegram_secret_apply
+  when:
+    - telegram_bot_token | length > 0
+    - telegram_chat_id | length > 0
+  no_log: true
+  changed_when: >
+    'created' in telegram_secret_apply.stdout or
+    'configured' in telegram_secret_apply.stdout
+
+- name: Copy Telegram AlertmanagerConfig
+  ansible.builtin.template:
+    src: alertmanagerconfig-telegram.yaml.j2
+    dest: /tmp/alertmanagerconfig-telegram.yaml
+    mode: "0644"
+  when:
+    - telegram_bot_token | length > 0
+    - telegram_chat_id | length > 0
+
+- name: Apply Telegram AlertmanagerConfig
+  ansible.builtin.command:
+    cmd: kubectl --kubeconfig /etc/kubernetes/admin.conf apply --filename /tmp/alertmanagerconfig-telegram.yaml
+  register: telegram_alertmanager_config_apply
+  changed_when: >
+    'created' in telegram_alertmanager_config_apply.stdout or
+    'configured' in telegram_alertmanager_config_apply.stdout
+  when:
+    - telegram_bot_token | length > 0
+    - telegram_chat_id | length > 0
+
+- name: Skip Telegram alerting
+  ansible.builtin.debug:
+    msg: "Telegram alerting is skipped because TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is empty."
+  when: telegram_bot_token | length == 0 or telegram_chat_id | length == 0
+
+- name: Copy Loki values
+  ansible.builtin.copy:
+    src: loki-values.yaml
+    dest: /tmp/loki-values.yaml
+    mode: "0644"
+
+- name: Install or upgrade Loki
+  kubernetes.core.helm:
+    binary_path: /usr/local/bin/helm
+    kubeconfig: /etc/kubernetes/admin.conf
+    release_name: loki
+    chart_ref: loki
+    chart_repo_url: https://grafana-community.github.io/helm-charts
+    chart_version: "{{ loki_chart_version }}"
+    release_namespace: monitoring
+    create_namespace: true
+    values_files:
+      - /tmp/loki-values.yaml
+    state: present
+    wait: true
+    atomic: true
+    timeout: 10m0s
+    history_max: 5
+
+- name: Copy Alloy values
+  ansible.builtin.copy:
+    src: alloy-values.yaml
+    dest: /tmp/alloy-values.yaml
+    mode: "0644"
+
+- name: Install or upgrade Alloy
+  kubernetes.core.helm:
+    binary_path: /usr/local/bin/helm
+    kubeconfig: /etc/kubernetes/admin.conf
+    release_name: alloy
+    chart_ref: alloy
+    chart_repo_url: https://grafana.github.io/helm-charts
+    chart_version: "{{ alloy_chart_version }}"
+    release_namespace: monitoring
+    create_namespace: true
+    values_files:
+      - /tmp/alloy-values.yaml
+    state: present
+    wait: true
+    atomic: true
+    timeout: 5m0s
+    history_max: 5

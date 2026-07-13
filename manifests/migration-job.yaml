@@ -1,0 +1,30 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: backend-migrations
+  namespace: mainplatform
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/sync-wave: "-1"
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app: backend-migrations
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: migrate
+          image: ghcr.io/1001-night/mainplatform-backend:0ff8f61ad216971536364145de711c7767042eba
+          imagePullPolicy: Always
+          command:
+            - sh
+            - -c
+            - alembic upgrade head
+          envFrom:
+            - configMapRef:
+                name: mainplatform-config
+            - secretRef:
+                name: mainplatform-secret
